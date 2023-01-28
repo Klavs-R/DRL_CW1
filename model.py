@@ -28,14 +28,14 @@ class DQN(nn.Module):
         super(DQN, self).__init__()
 
         # Initiate in and output layers
-        self.in_layer = nn.Linear(state_n, layer_nodes[0])
-        self.out_layer = nn.Linear(layer_nodes[-1], action_n)
-
-        # Initiate all hidden layers
-        self.h_layers = []
+        layers = [nn.Linear(state_n, layer_nodes[0])]
 
         for i in range(len(layer_nodes)-1):
-            self.h_layers.append(nn.Linear(layer_nodes[i], layer_nodes[i+1]))
+            layers.append(nn.Linear(layer_nodes[i], layer_nodes[i+1]))
+
+        layers.append(nn.Linear(layer_nodes[-1], action_n))
+
+        self.layers = nn.ModuleList(layers)
 
     def forward(self, state):
         """
@@ -46,12 +46,12 @@ class DQN(nn.Module):
         """
 
         # Pass output of each layer as input to the next
-        x = f.relu(self.in_layer(state))
+        x = f.relu(self.layers[0](state))
 
-        for layer in self.h_layers:
+        for layer in self.layers[1:-1]:
             x = f.relu(layer(x))
 
-        return self.out_layer(x)
+        return self.layers[-1](x)
 
 
 # Memory Buffer for Prioritized Experience Replay
@@ -59,12 +59,11 @@ class MemoryBuffer:
 
     def __init__(self, buffer_size):
         """
-        Initialise the prioritised memory buffer
+        Initialise the memory buffer
 
         :param buffer_size (Int): Max length of the memory buffer
         """
         self.experiences = deque(maxlen=buffer_size)
-        self.priorities = deque(maxlen=buffer_size)
         self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
 
     def add(self, state, action, reward, next_state, done):
@@ -73,91 +72,27 @@ class MemoryBuffer:
         """
         # Experience tuple is initially assigned the highest priority
         experience = self.experience(state, action, reward, next_state, done)
-        max_priority = max(self.priorities, default=1)
-
         self.experiences.append(experience)
-        self.priorities.append(max_priority)
 
     def sample(self, batch_size):
         """
-        Sample a batch of experiences with probability based on priority
+        Sample a batch of experiences
 
         :return: List of experience tuples and accompanying weights
         """
 
-        total_priority = sum(self.priorities)
-        probs = [priority / total_priority for priority in self.priorities]
+        experiences = random.sample(self.experiences, k=batch_size)
 
-        # Double normalise as above is not accurate enough
-        probs = np.array(probs)
-        probs = probs / float(probs.sum())
+        states = torch.from_numpy(np.vstack([e.state for e in experiences if e is not None])).float().to(device)
+        actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).long().to(device)
+        rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float().to(device)
+        next_states = torch.from_numpy(np.vstack([e.next_state for e in experiences if e is not None])).float().to(device)
+        dones = torch.from_numpy(np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(device)
 
-        indices = np.random.choice(len(self.experiences), batch_size, p=probs, replace=False)
-        experiences = [self.experiences[idx] for idx in indices]
-
-        states = torch.Tensor([e.state for e in experiences if e is not None]).float().to(device)
-        actions = torch.Tensor([e.action for e in experiences if e is not None]).long().to(device)
-        rewards = torch.Tensor([e.reward for e in experiences if e is not None]).float().to(device)
-        next_states = torch.Tensor([e.next_state for e in experiences if e is not None]).float().to(device)
-        dones = torch.Tensor([e.done for e in experiences if e is not None]).float().to(device)
-
-        return indices, (states, actions, rewards, next_states, dones)
-
-    def update_priorities(self, indices, errors):
-        """
-        Update priorities of given experiences with given errors
-        """
-        for i, error in zip(indices, errors):
-            self.priorities[i] = abs(float(error)) + 1e-5
+        return states, actions, rewards, next_states, dones
 
     def __len__(self):
         return len(self.experiences)
-
-# Testing non-prioritised memory replay
-# class MemoryBuffer:
-#
-#     def __init__(self, buffer_size):
-#         """
-#         Initialise the prioritised memory buffer
-#
-#         :param buffer_size (Int): Max length of the memory buffer
-#         """
-#         self.experiences = deque(maxlen=buffer_size)
-#         self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
-#
-#     def add(self, state, action, reward, next_state, done):
-#         """
-#         Adding an experience to memory
-#         """
-#         experience = self.experience(state, action, reward, next_state, done)
-#         self.experiences.append(experience)
-#
-#     def sample(self, batch_size):
-#         """
-#         Sample a batch of experiences with probability based on priority
-#
-#         :return: List of experience tuples and accompanying weights
-#         """
-#
-#         indices = np.random.choice(len(self.experiences), batch_size, replace=False)
-#         experiences = [self.experiences[idx] for idx in indices]
-#
-#         states = torch.Tensor([e.state for e in experiences if e is not None]).float().to(device)
-#         actions = torch.Tensor([e.action for e in experiences if e is not None]).long().to(device)
-#         rewards = torch.Tensor([e.reward for e in experiences if e is not None]).float().to(device)
-#         next_states = torch.Tensor([e.next_state for e in experiences if e is not None]).float().to(device)
-#         dones = torch.Tensor([e.done for e in experiences if e is not None]).float().to(device)
-#
-#         return indices, (states, actions, rewards, next_states, dones)
-#
-#     def update_priorities(self, indices, errors):
-#         """
-#         Update priorities of given experiences with given errors
-#         """
-#         pass
-#
-#     def __len__(self):
-#         return len(self.experiences)
 
 
 class Agent:
@@ -167,11 +102,11 @@ class Agent:
             state_n,
             action_n,
             layer_nodes,
-            batch_n=128,
+            batch_n=64,
             gamma=0.99,
             tau=0.001,
             learning_rate=5e-4,
-            update_every=4
+            update_every=4,
     ):
         """
         Initialise agent to interact with and learn from the env
@@ -221,12 +156,12 @@ class Agent:
         else:
             return np.random.choice(np.arange(self.action_n))
 
-    def step(self, state, action, reward, state2, done):
+    def step(self, state, action, reward, next_state, done):
         """
         Complete updates at each time step
         """
         # First, save the last experience in memory
-        self.memory.add(state, action, reward, state2, done)
+        self.memory.add(state, action, reward, next_state, done)
 
         # Learn if necessary
         self.t_step += 1
@@ -242,31 +177,26 @@ class Agent:
             return
 
         # Sample a batch of experiences from the memory buffer
-        indices, experiences = self.memory.sample(self.batch_n)
-        states, actions, rewards, next_states, dones = experiences
+        states, actions, rewards, next_states, dones = self.memory.sample(self.batch_n)
 
         # DOUBLE Q-LEARNING ------------------------------------------------------------ #
         # Best action values according to local nn
-        next_q_local = self.local_nn(next_states)
+        next_q_local = self.local_nn(next_states).detach()
         target_q_actions = torch.argmax(next_q_local, dim=1)
 
         # Calculate the Q-values of the next states and actions using target nn
-        next_q_target = self.local_nn(next_states)
-        q_targets = next_q_target[range(self.batch_n), target_q_actions]
+        next_q_target = self.target_nn(next_states).detach()
+        q_targets = next_q_target[range(self.batch_n), target_q_actions].unsqueeze(1)
 
         # Calculate the Q-targets for the current states
         q_targets = rewards + self.gamma * q_targets * (1 - dones)
         # ------------------------------------------------------------------------------ #
 
         # Get expected Q-values from local nn
-        q_expected = self.local_nn(states)[range(self.batch_n), actions]
-
-        # Update the priorities in the memory buffer
-        errors = q_targets - q_expected
-        self.memory.update_priorities(indices, errors)
+        q_expected = self.local_nn(states).gather(1, actions)
 
         # Calculate and minimise loss at each experience
-        loss = f.mse_loss(q_expected.unsqueeze(1), q_targets.unsqueeze(1))
+        loss = f.mse_loss(q_expected, q_targets)
         self.optimiser.zero_grad()
         loss.backward()
         self.optimiser.step()
@@ -282,15 +212,3 @@ class Agent:
         """
         for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
             target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
-
-
-
-
-
-
-
-
-
-
-
-
